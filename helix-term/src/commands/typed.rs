@@ -2504,16 +2504,18 @@ fn terminal(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> an
         return Ok(());
     }
     cx.jobs.callback(async {
-        Ok(job::Callback::EditorCompositor(Box::new(|editor, compositor| {
-            if let Some(terminal) = compositor.find::<ui::terminal::Terminal>() {
-                terminal.visible = true;
-            } else {
-                match ui::terminal::Terminal::new(compositor.size()) {
-                    Ok(terminal) => compositor.push(Box::new(terminal)),
-                    Err(err) => editor.set_error(format!("Cannot open terminal: {err:#}")),
+        Ok(job::Callback::EditorCompositor(Box::new(
+            |editor, compositor| {
+                if let Some(terminal) = compositor.find::<ui::terminal::Terminal>() {
+                    terminal.visible = true;
+                } else {
+                    match ui::terminal::Terminal::new(compositor.size()) {
+                        Ok(terminal) => compositor.push(Box::new(terminal)),
+                        Err(err) => editor.set_error(format!("Cannot open terminal: {err:#}")),
+                    }
                 }
-            }
-        })))
+            },
+        )))
     });
     Ok(())
 }

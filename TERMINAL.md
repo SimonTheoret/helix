@@ -50,8 +50,8 @@ cargo test -p helix-term --features integration
 cargo build -p helix-term --release
 ```
 
-Cargo must resolve the new dependencies and update `Cargo.lock`; include that
-generated lockfile when committing in a complete checkout. The included Rust
+The dependency versions are recorded in `Cargo.lock`. CI uses `--locked` and
+checks the Rust 1.82 build on Linux and Windows. The included Rust
 tests cover input encoding, paste envelopes, fragmented Unicode, ANSI colours,
 device and color responses, alternate screens, scrollback, synchronized-output
 timeouts, cursor shapes, text attributes, viewport geometry, and an

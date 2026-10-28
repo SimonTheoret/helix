@@ -30,23 +30,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: terminal
-      - name: Format Rust sources
-        run: cargo fmt --all
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
       - name: Check editor and test targets
-        run: cargo check -p helix-term --all-targets
+        run: cargo check -p helix-term --locked --all-targets
       - name: Test terminal protocol, rendering, and PTY integration
-        run: "cargo test -p helix-term terminal::"
+        run: "cargo test -p helix-term --locked terminal::"
       - name: Check integration feature
-        run: cargo check -p helix-term --features integration
-      - name: Save formatting and dependency resolution
-        if: always()
-        shell: bash
-        run: |
-          git diff --binary > terminal-validation.patch
-          python -c "import base64,json,pathlib; print(json.dumps({'terminal_patch_base64':base64.b64encode(pathlib.Path('terminal-validation.patch').read_bytes()).decode()}))"
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: terminal-validation-${{ runner.os }}
-          path: terminal-validation.patch
-          retention-days: 7
+        run: cargo check -p helix-term --locked --features integration

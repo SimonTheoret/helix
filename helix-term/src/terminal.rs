@@ -26,7 +26,10 @@ struct TerminalEvents(mpsc::Sender<Event>);
 
 impl EventListener for TerminalEvents {
     fn send_event(&self, event: Event) {
-        if matches!(event, Event::PtyWrite(_) | Event::ColorRequest(..) | Event::TextAreaSizeRequest(_)) {
+        if matches!(
+            event,
+            Event::PtyWrite(_) | Event::ColorRequest(..) | Event::TextAreaSizeRequest(_)
+        ) {
             let _ = self.0.send(event);
         }
     }
@@ -72,7 +75,10 @@ impl Screen {
             kitty_keyboard: false,
             ..Config::default()
         };
-        let size = Size { rows: rows.max(1), cols: cols.max(1) };
+        let size = Size {
+            rows: rows.max(1),
+            cols: cols.max(1),
+        };
         Self {
             term: Term::new(config, &size, TerminalEvents(tx)),
             processor: Processor::new(),
@@ -130,7 +136,10 @@ impl Screen {
     }
 
     fn resize(&mut self, rows: u16, cols: u16) {
-        self.term.resize(Size { rows: rows.max(1), cols: cols.max(1) });
+        self.term.resize(Size {
+            rows: rows.max(1),
+            cols: cols.max(1),
+        });
     }
 
     pub fn mode(&self) -> TermMode {
@@ -172,17 +181,33 @@ impl Screen {
             }
         }
         const ANSI: [[u8; 3]; 16] = [
-            [0, 0, 0], [205, 0, 0], [0, 205, 0], [205, 205, 0],
-            [0, 0, 238], [205, 0, 205], [0, 205, 205], [229, 229, 229],
-            [127, 127, 127], [255, 0, 0], [0, 255, 0], [255, 255, 0],
-            [92, 92, 255], [255, 0, 255], [0, 255, 255], [255, 255, 255],
+            [0, 0, 0],
+            [205, 0, 0],
+            [0, 205, 0],
+            [205, 205, 0],
+            [0, 0, 238],
+            [205, 0, 205],
+            [0, 205, 205],
+            [229, 229, 229],
+            [127, 127, 127],
+            [255, 0, 0],
+            [0, 255, 0],
+            [255, 255, 0],
+            [92, 92, 255],
+            [255, 0, 255],
+            [0, 255, 255],
+            [255, 255, 255],
         ];
         let [r, g, b] = match index {
             0..=15 => ANSI[index],
             16..=231 => {
                 let value = index - 16;
                 let component = |n: usize| if n == 0 { 0 } else { (55 + n * 40) as u8 };
-                [component(value / 36), component(value / 6 % 6), component(value % 6)]
+                [
+                    component(value / 36),
+                    component(value / 6 % 6),
+                    component(value % 6),
+                ]
             }
             232..=255 => [8 + (index as u8 - 232) * 10; 3],
             257 => [0, 0, 0],
@@ -201,7 +226,10 @@ impl Screen {
         for row in 0..rows {
             for col in 0..cols {
                 let cell = self.cell(row, col).unwrap();
-                if !cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+                if !cell
+                    .flags
+                    .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                {
                     text.push_str(&cell_text(cell));
                 }
             }
@@ -256,7 +284,10 @@ impl Session {
             .context("open terminal PTY")?;
         let mut reader = pair.master.try_clone_reader()?;
         let mut writer = pair.master.take_writer()?;
-        let mut child = pair.slave.spawn_command(command).context("start terminal shell")?;
+        let mut child = pair
+            .slave
+            .spawn_command(command)
+            .context("start terminal shell")?;
         drop(pair.slave);
         let killer = child.clone_killer();
         let (input_tx, input_rx) = mpsc::sync_channel::<Vec<u8>>(16);
@@ -323,7 +354,12 @@ impl Session {
         })
     }
 
-    pub fn shell(cwd: &Path, rows: u16, cols: u16, wake: Arc<dyn Fn() + Send + Sync>) -> Result<Self> {
+    pub fn shell(
+        cwd: &Path,
+        rows: u16,
+        cols: u16,
+        wake: Arc<dyn Fn() + Send + Sync>,
+    ) -> Result<Self> {
         let shell_var = if cfg!(windows) { "COMSPEC" } else { "SHELL" };
         let mut command = match std::env::var_os(shell_var).filter(|s| !s.is_empty()) {
             Some(shell) => CommandBuilder::new(shell),
@@ -365,7 +401,8 @@ impl Session {
             if let Some((_, task)) = self.sync_timer.take() {
                 task.abort();
             }
-            if let (Some(deadline), Ok(runtime)) = (deadline, tokio::runtime::Handle::try_current()) {
+            if let (Some(deadline), Ok(runtime)) = (deadline, tokio::runtime::Handle::try_current())
+            {
                 let wake = self.wake.clone();
                 let task = runtime.spawn(async move {
                     tokio::time::sleep_until(deadline.into()).await;
@@ -384,7 +421,9 @@ impl Session {
             bail!("Terminal input exceeds 1 MiB");
         }
         self.input.try_send(bytes).map_err(|err| match err {
-            mpsc::TrySendError::Full(_) => anyhow::anyhow!("Terminal input queue is full; retry input"),
+            mpsc::TrySendError::Full(_) => {
+                anyhow::anyhow!("Terminal input queue is full; retry input")
+            }
             mpsc::TrySendError::Disconnected(_) => anyhow::anyhow!("Terminal input is closed"),
         })
     }
@@ -411,7 +450,12 @@ impl Drop for Session {
 }
 
 fn pty_size(rows: u16, cols: u16) -> PtySize {
-    PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }
+    PtySize {
+        rows,
+        cols,
+        pixel_width: 0,
+        pixel_height: 0,
+    }
 }
 
 pub(crate) fn paste(text: &str, bracketed: bool) -> Vec<u8> {
@@ -437,7 +481,9 @@ pub(crate) fn encode_key(key: KeyEvent, application_cursor: bool) -> Vec<u8> {
     let mut bytes = Vec::new();
     let sequence = match key.code {
         Char(ch) => {
-            if alt { bytes.push(0x1b); }
+            if alt {
+                bytes.push(0x1b);
+            }
             if ctrl {
                 match ch.to_ascii_lowercase() {
                     'a'..='z' => bytes.push(ch.to_ascii_lowercase() as u8 - b'a' + 1),
@@ -458,32 +504,63 @@ pub(crate) fn encode_key(key: KeyEvent, application_cursor: bool) -> Vec<u8> {
         }
         Up | Down | Right | Left | Home | End => {
             let end = match key.code {
-                Up => 'A', Down => 'B', Right => 'C', Left => 'D', Home => 'H', _ => 'F',
+                Up => 'A',
+                Down => 'B',
+                Right => 'C',
+                Left => 'D',
+                Home => 'H',
+                _ => 'F',
             };
-            if modifier != 1 { format!("\x1b[1;{modifier}{end}") }
-            else if application_cursor { format!("\x1bO{end}") }
-            else { format!("\x1b[{end}") }
+            if modifier != 1 {
+                format!("\x1b[1;{modifier}{end}")
+            } else if application_cursor {
+                format!("\x1bO{end}")
+            } else {
+                format!("\x1b[{end}")
+            }
         }
         Insert | Delete | PageUp | PageDown | F(5..=12) => {
             let number = match key.code {
-                Insert => 2, Delete => 3, PageUp => 5, PageDown => 6,
-                F(5) => 15, F(6) => 17, F(7) => 18, F(8) => 19,
-                F(9) => 20, F(10) => 21, F(11) => 23, _ => 24,
+                Insert => 2,
+                Delete => 3,
+                PageUp => 5,
+                PageDown => 6,
+                F(5) => 15,
+                F(6) => 17,
+                F(7) => 18,
+                F(8) => 19,
+                F(9) => 20,
+                F(10) => 21,
+                F(11) => 23,
+                _ => 24,
             };
-            if modifier == 1 { format!("\x1b[{number}~") }
-            else { format!("\x1b[{number};{modifier}~") }
+            if modifier == 1 {
+                format!("\x1b[{number}~")
+            } else {
+                format!("\x1b[{number};{modifier}~")
+            }
         }
         F(1..=4) => {
             let F(number) = key.code else { unreachable!() };
             let end = char::from(b'P' + number - 1);
-            if modifier == 1 { format!("\x1bO{end}") }
-            else { format!("\x1b[1;{modifier}{end}") }
+            if modifier == 1 {
+                format!("\x1bO{end}")
+            } else {
+                format!("\x1b[1;{modifier}{end}")
+            }
         }
         Enter | Backspace | Tab | Esc | Null => {
-            if alt { bytes.push(0x1b); }
+            if alt {
+                bytes.push(0x1b);
+            }
             bytes.extend_from_slice(match key.code {
-                Enter => b"\r", Backspace if ctrl => b"\x08", Backspace => b"\x7f",
-                Tab if shift => b"\x1b[Z", Tab => b"\t", Esc => b"\x1b", _ => b"\0",
+                Enter => b"\r",
+                Backspace if ctrl => b"\x08",
+                Backspace => b"\x7f",
+                Tab if shift => b"\x1b[Z",
+                Tab => b"\t",
+                Esc => b"\x1b",
+                _ => b"\0",
             });
             return bytes;
         }
@@ -505,8 +582,14 @@ mod tests {
         use KeyCode::*;
         use KeyModifiers as M;
         assert_eq!(encode_key(key(Char('c'), M::CONTROL), false), b"\x03");
-        assert_eq!(encode_key(key(Char('C'), M::CONTROL | M::SHIFT), false), b"\x03");
-        assert_eq!(encode_key(key(Char('é'), M::ALT), false), "\x1bé".as_bytes());
+        assert_eq!(
+            encode_key(key(Char('C'), M::CONTROL | M::SHIFT), false),
+            b"\x03"
+        );
+        assert_eq!(
+            encode_key(key(Char('é'), M::ALT), false),
+            "\x1bé".as_bytes()
+        );
         assert_eq!(encode_key(key(Up, M::NONE), false), b"\x1b[A");
         assert_eq!(encode_key(key(Up, M::NONE), true), b"\x1bOA");
         assert_eq!(encode_key(key(Left, M::CONTROL), true), b"\x1b[1;5D");
@@ -530,10 +613,17 @@ mod tests {
             screen.process(&[*byte]);
         }
         assert_eq!(screen.cell(0, 0).unwrap().c, '界');
-        assert!(screen.cell(0, 1).unwrap().flags.contains(Flags::WIDE_CHAR_SPACER));
+        assert!(screen
+            .cell(0, 1)
+            .unwrap()
+            .flags
+            .contains(Flags::WIDE_CHAR_SPACER));
         assert_eq!(cell_text(screen.cell(0, 2).unwrap()), "e\u{301}");
         assert_eq!(screen.cell(0, 0).unwrap().fg, Color::Named(NamedColor::Red));
-        assert_eq!(screen.process(b"\x1b[6n\x1b[5n\x1b[c"), b"\x1b[1;4R\x1b[0n\x1b[?6c");
+        assert_eq!(
+            screen.process(b"\x1b[6n\x1b[5n\x1b[c"),
+            b"\x1b[1;4R\x1b[0n\x1b[?6c"
+        );
         screen.process(b"\x1b[?1049hOTHER\x1b[?1049l");
         assert!(screen.contents().contains("界e\u{301}"));
     }
@@ -561,7 +651,9 @@ mod tests {
             b"\x1b]4;1;rgb:1212/3434/5656\x07"
         );
         screen.process(b"\x1b[?1h\x1b[?2004h\x1b[6 q");
-        assert!(screen.mode().contains(TermMode::APP_CURSOR | TermMode::BRACKETED_PASTE));
+        assert!(screen
+            .mode()
+            .contains(TermMode::APP_CURSOR | TermMode::BRACKETED_PASTE));
         assert_eq!(screen.cursor().shape, CursorShape::Beam);
         screen.process(b"\x1b[?25l");
         assert_eq!(screen.cursor().shape, CursorShape::Hidden);
@@ -593,7 +685,10 @@ mod tests {
     #[test]
     fn real_pty_input_resize_and_exit() {
         let mut cmd = CommandBuilder::new("/bin/sh");
-        cmd.args(["-c", "stty -echo; printf READY; read value; stty size; printf '<%s>' \"$value\""]);
+        cmd.args([
+            "-c",
+            "stty -echo; printf READY; read value; stty size; printf '<%s>' \"$value\"",
+        ]);
         let mut session = Session::spawn(cmd, 4, 40, Arc::new(|| {})).unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while !session.screen.contents().contains("READY") {
@@ -610,7 +705,10 @@ mod tests {
                 assert!(text.contains("6 50"));
                 break;
             }
-            assert!(std::time::Instant::now() < deadline, "missing PTY output: {text}");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "missing PTY output: {text}"
+            );
             thread::sleep(std::time::Duration::from_millis(10));
         }
     }

@@ -32,13 +32,13 @@ impl Terminal {
             let _guard = runtime.enter();
             helix_event::request_redraw();
         });
-        let session = Session::shell(
-            &std::env::current_dir()?,
-            body.height,
-            body.width,
-            wake,
-        )?;
-        Ok(Self { session, visible: true, prefix: false, area })
+        let session = Session::shell(&std::env::current_dir()?, body.height, body.width, wake)?;
+        Ok(Self {
+            session,
+            visible: true,
+            prefix: false,
+            area,
+        })
     }
 
     fn send(&mut self, bytes: Vec<u8>, ctx: &mut Context) {
@@ -50,7 +50,9 @@ impl Terminal {
 
     fn scroll(&mut self, up: bool, amount: usize) {
         let amount = amount.min(i32::MAX as usize) as i32;
-        self.session.screen.scroll(Scroll::Delta(if up { amount } else { -amount }));
+        self.session
+            .screen
+            .scroll(Scroll::Delta(if up { amount } else { -amount }));
     }
 
     fn key(&mut self, key: KeyEvent, ctx: &mut Context) -> EventResult {
@@ -90,7 +92,11 @@ impl Terminal {
         let application_cursor = self.session.screen.mode().contains(TermMode::APP_CURSOR);
         let mut bytes = encode_key(key, application_cursor);
         if key.code == KeyCode::Enter
-            && self.session.screen.mode().contains(TermMode::LINE_FEED_NEW_LINE)
+            && self
+                .session
+                .screen
+                .mode()
+                .contains(TermMode::LINE_FEED_NEW_LINE)
         {
             bytes.push(b'\n');
         }
@@ -116,7 +122,11 @@ impl Component for Terminal {
         match event {
             Event::Key(key) => return self.key(*key, ctx),
             Event::Paste(text) => {
-                let bracketed = self.session.screen.mode().contains(TermMode::BRACKETED_PASTE);
+                let bracketed = self
+                    .session
+                    .screen
+                    .mode()
+                    .contains(TermMode::BRACKETED_PASTE);
                 self.send(paste(text, bracketed), ctx);
             }
             Event::Mouse(mouse) => match mouse.kind {
@@ -145,27 +155,40 @@ impl Component for Terminal {
         let header_y = body.y.saturating_sub(1).max(area.y);
         let header_style = ctx.editor.theme.get("ui.statusline");
         for x in area.x..area.right() {
-            let cell = frame.get_mut(x, header_y);
+            let Some(cell) = frame.get_mut(x, header_y) else {
+                continue;
+            };
             cell.reset();
             cell.set_style(header_style);
         }
-        let state = self.session.error.as_deref().or(self.session.exit.as_deref());
+        let state = self
+            .session
+            .error
+            .as_deref()
+            .or(self.session.exit.as_deref());
         let title = match state {
             Some(state) => format!(" Terminal [{state}] | C-\\ C-n hide | C-\\ C-q close"),
             None if self.prefix => " Terminal | C-n hide | C-q close | C-\\ send prefix".to_owned(),
-            None => " Terminal | C-\\ C-n hide | C-\\ C-q close | Shift-PgUp/PgDn scroll".to_owned(),
+            None => {
+                " Terminal | C-\\ C-n hide | C-\\ C-q close | Shift-PgUp/PgDn scroll".to_owned()
+            }
         };
         frame.set_stringn(area.x, header_y, title, area.width as usize, header_style);
 
         let screen = &self.session.screen;
         for row in 0..body.height {
             for col in 0..body.width {
-                let target = frame.get_mut(body.x + col, body.y + row);
+                let Some(target) = frame.get_mut(body.x + col, body.y + row) else {
+                    continue;
+                };
                 target.reset();
                 if let Some(source) = screen.cell(row, col) {
                     // The renderer accounts for wide glyphs; do not draw their
                     // continuation cells as independent glyphs.
-                    if !source.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+                    if !source
+                        .flags
+                        .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                    {
                         target.set_symbol(&cell_text(source));
                     }
                     target.set_style(cell_style(source, screen));
@@ -186,9 +209,11 @@ impl Component for Terminal {
         let hidden = screen.scroll_offset() != 0 || body.height == 0 || self.session.exit.is_some();
         let position = Position::new(
             (body.y + row.min(body.height.saturating_sub(1)))
-                .min(area.bottom().saturating_sub(1)).max(area.y) as usize,
+                .min(area.bottom().saturating_sub(1))
+                .max(area.y) as usize,
             (body.x + col.min(body.width.saturating_sub(1)))
-                .min(area.right().saturating_sub(1)).max(area.x) as usize,
+                .min(area.right().saturating_sub(1))
+                .max(area.x) as usize,
         );
         // Some(position) also prevents the underlying editor cursor showing
         // through when an application hides its own cursor.
@@ -208,7 +233,12 @@ impl Component for Terminal {
 
 fn body_area(area: Rect) -> Rect {
     let height = area.height.saturating_sub(1) / 2;
-    Rect { x: area.x, y: area.bottom() - height, width: area.width, height }
+    Rect {
+        x: area.x,
+        y: area.bottom() - height,
+        width: area.width,
+        height,
+    }
 }
 
 fn color(color: TerminalColor, screen: &Screen) -> Color {
@@ -240,7 +270,9 @@ fn cell_style(cell: &Cell, screen: &Screen) -> Style {
         (Flags::HIDDEN, Modifier::HIDDEN),
         (Flags::STRIKEOUT, Modifier::CROSSED_OUT),
     ] {
-        if cell.flags.contains(flag) { modifiers.insert(modifier); }
+        if cell.flags.contains(flag) {
+            modifiers.insert(modifier);
+        }
     }
     let underline = if cell.flags.contains(Flags::DOUBLE_UNDERLINE) {
         UnderlineStyle::DoubleLine
@@ -273,7 +305,12 @@ mod tests {
     #[test]
     fn terminal_geometry_stays_inside_viewport() {
         for height in 0..40 {
-            let area = Rect { x: 3, y: 5, width: 80, height };
+            let area = Rect {
+                x: 3,
+                y: 5,
+                width: 80,
+                height,
+            };
             let body = body_area(area);
             assert!(body.y >= area.y);
             assert_eq!(body.bottom(), area.bottom());
@@ -289,7 +326,9 @@ mod tests {
         let cell = screen.cell(0, 0).unwrap();
         let style = cell_style(cell, &screen);
         assert_eq!(style.fg, Some(Color::Rgb(0x12, 0x34, 0x56)));
-        assert!(style.add_modifier.contains(Modifier::BOLD | Modifier::CROSSED_OUT));
+        assert!(style
+            .add_modifier
+            .contains(Modifier::BOLD | Modifier::CROSSED_OUT));
         assert_eq!(style.underline_style, Some(UnderlineStyle::Curl));
     }
 }
