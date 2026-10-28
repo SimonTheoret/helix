@@ -38,6 +38,11 @@ impl Context<'_> {
 }
 
 pub trait Component: Any + AnyComponent {
+    /// Terminal input belongs to the child process, not editor macros.
+    fn records_macro_keys(&self) -> bool {
+        true
+    }
+
     /// Process input events, return true if handled.
     fn handle_event(&mut self, _event: &Event, _ctx: &mut Context) -> EventResult {
         EventResult::Ignored(None)
@@ -140,7 +145,9 @@ impl Compositor {
         // If it is a key event, a macro is being recorded, and a macro isn't being replayed,
         // push the key event to the recording.
         if let (Event::Key(key), Some((_, keys))) = (event, &mut cx.editor.macro_recording) {
-            if cx.editor.macro_replaying.is_empty() {
+            if cx.editor.macro_replaying.is_empty()
+                && self.layers.iter().all(|layer| layer.records_macro_keys())
+            {
                 keys.push(*key);
             }
         }

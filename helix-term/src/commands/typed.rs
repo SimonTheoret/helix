@@ -2499,6 +2499,25 @@ fn clear_register(
     Ok(())
 }
 
+fn terminal(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+    cx.jobs.callback(async {
+        Ok(job::Callback::EditorCompositor(Box::new(|editor, compositor| {
+            if let Some(terminal) = compositor.find::<ui::terminal::Terminal>() {
+                terminal.visible = true;
+            } else {
+                match ui::terminal::Terminal::new(compositor.size()) {
+                    Ok(terminal) => compositor.push(Box::new(terminal)),
+                    Err(err) => editor.set_error(format!("Cannot open terminal: {err:#}")),
+                }
+            }
+        })))
+    });
+    Ok(())
+}
+
 fn redraw(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> anyhow::Result<()> {
     if event != PromptEvent::Validate {
         return Ok(());
@@ -3572,6 +3591,17 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
         fun: run_shell_command,
         completer: SHELL_COMPLETER,
         signature: SHELL_SIGNATURE,
+    },
+    TypableCommand {
+        name: "terminal",
+        aliases: &["term"],
+        doc: "Open or resume the terminal. C-\\ C-n hides it; C-\\ C-q closes it.",
+        fun: terminal,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
     },
     TypableCommand {
         name: "reset-diff-change",
