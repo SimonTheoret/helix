@@ -22,7 +22,7 @@ Terminal keystrokes are excluded from editor macro recordings.
 
 The implementation is Rust: `portable-pty` supplies Unix PTYs and Windows
 ConPTY, and `alacritty_terminal` maintains the terminal screen and parses output.
-The 0.25 library series supports the release's Rust 1.82 toolchain. It supports ANSI colours
+Version 0.25.0 is pinned to support the release's Rust 1.82 toolchain. It supports ANSI colours
 (including indexed and RGB colours), text attributes, Unicode and wide cells,
 alternate screens, application cursor keys, bracketed paste, terminal queries,
 resizing with line reflow, synchronized output, cursor shapes, palette changes,

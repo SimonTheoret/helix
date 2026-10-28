@@ -41,7 +41,9 @@ jobs:
       - name: Save formatting and dependency resolution
         if: always()
         shell: bash
-        run: git diff --binary > terminal-validation.patch
+        run: |
+          git diff --binary > terminal-validation.patch
+          python -c "import base64,json,pathlib; print(json.dumps({'terminal_patch_base64':base64.b64encode(pathlib.Path('terminal-validation.patch').read_bytes()).decode()}))"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
