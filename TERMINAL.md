@@ -22,8 +22,8 @@ Terminal keystrokes are excluded from editor macro recordings.
 
 The implementation is Rust: `portable-pty` supplies Unix PTYs and Windows
 ConPTY, and `alacritty_terminal` maintains the terminal screen and parses output.
-Version 0.25.0 is pinned to support the release's Rust 1.82 toolchain. It supports ANSI colours
-(including indexed and RGB colours), text attributes, Unicode and wide cells,
+Version 0.25.0 is pinned to support the release's Rust 1.82 toolchain. It supports
+ANSI colours (including indexed and RGB colours), text attributes, Unicode and wide cells,
 alternate screens, application cursor keys, bracketed paste, terminal queries,
 resizing with line reflow, synchronized output, cursor shapes, palette changes,
 and 10,000 lines of scrollback. PTY reads, writes, and process waiting
@@ -40,14 +40,16 @@ are not implemented. Terminal clipboard requests are ignored.
 This branch is based on upstream Helix **25.07.1** (the release requested as
 25.07.01), commit `a05c151bb6e8e9c65ec390b0ae2afe7a5efd619b`.
 It retains the release's Rust 1.82.0 toolchain and crossterm integration.
+Upstream PR #14746 is backported for the maintained Go-template grammar and
+its matching queries.
 With that toolchain in a complete checkout:
 
 ```sh
 cargo fmt --all
-cargo check -p helix-term
-cargo test -p helix-term terminal::
-cargo test -p helix-term --features integration
-cargo build -p helix-term --release
+cargo check -p helix-term --locked
+cargo test -p helix-term --locked terminal::
+cargo test -p helix-term --locked --features integration
+cargo build -p helix-term --locked --release
 ```
 
 The dependency versions are recorded in `Cargo.lock`. CI uses `--locked` and
@@ -63,12 +65,16 @@ run an interactive program such as `less`, resize the outer terminal, hide the
 pane, and reopen it. Check that the same shell and its output remain. Exit the
 shell and verify that its final output remains readable before closing the pane.
 
-## Validation status of this patch
+## Validation
 
-This patch was prepared from upstream source fetched through the GitHub
-connector. The execution environment had no Rust toolchain and its network
-proxy was unreachable, so compilation, formatting, dependency resolution, and
-test execution could not be performed. `git diff --check` passed, and
-`git apply --check` passed against source files verified to match upstream Git
-blob hashes. Compilation and test execution still need to be completed in a
-full checkout with the release's Rust toolchain.
+The Rust sources in commit `c8bff2ce850318baf671c43f3accebaf62ee26f0` passed
+the [Terminal workflow](https://github.com/SimonTheoret/helix/actions/runs/40763885603)
+with Rust 1.82.0 on Linux and Windows: formatting, compilation of all editor
+test targets, the terminal test suite, and compilation with the `integration`
+feature. The Linux suite includes a live PTY test covering shell input,
+resizing, output, and exit. The checks use the committed dependency lockfile.
+
+Automatic grammar builds are disabled for this focused workflow. The
+Go-template grammar from PR #14746 was compiled separately. A complete
+interactive editor smoke test and interactive Windows ConPTY validation
+remain manual checks.
