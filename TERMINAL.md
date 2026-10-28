@@ -21,10 +21,12 @@ until you close it. Open `:terminal` again after closing to start a new shell.
 Terminal keystrokes are excluded from editor macro recordings.
 
 The implementation is Rust: `portable-pty` supplies Unix PTYs and Windows
-ConPTY, and `vt100` maintains the terminal screen. It supports ANSI colours
+ConPTY, and `alacritty_terminal` maintains the terminal screen and parses output.
+The 0.25 library series supports the release's Rust 1.82 toolchain. It supports ANSI colours
 (including indexed and RGB colours), text attributes, Unicode and wide cells,
 alternate screens, application cursor keys, bracketed paste, terminal queries,
-resizing, and 10,000 lines of scrollback. PTY reads, writes, and process waiting
+resizing with line reflow, synchronized output, cursor shapes, palette changes,
+and 10,000 lines of scrollback. PTY reads, writes, and process waiting
 run on separate threads, with bounded queues and editor redraw notifications.
 Pastes larger than 1 MiB are rejected; a full input queue reports an error.
 
@@ -51,7 +53,8 @@ cargo build -p helix-term --release
 Cargo must resolve the new dependencies and update `Cargo.lock`; include that
 generated lockfile when committing in a complete checkout. The included Rust
 tests cover input encoding, paste envelopes, fragmented Unicode, ANSI colours,
-device responses, alternate screens, scrollback, viewport geometry, and an
+device and color responses, alternate screens, scrollback, synchronized-output
+timeouts, cursor shapes, text attributes, viewport geometry, and an
 actual Unix PTY exchanging input, resizing, and exiting. Windows ConPTY needs
 validation on Windows.
 

@@ -3,7 +3,15 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::{mpsc, Arc};
 use std::thread;
+use std::time::Instant;
 
+use alacritty_terminal::event::{Event, EventListener, WindowSize};
+use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::index::{Column, Line, Point};
+use alacritty_terminal::term::cell::{Cell, Flags};
+use alacritty_terminal::term::{color, Config, Osc52, RenderableCursor, TermMode};
+use alacritty_terminal::vte::ansi::{Processor, Rgb};
+use alacritty_terminal::Term;
 use anyhow::{bail, Context, Result};
 use helix_view::input::{KeyCode, KeyEvent, KeyModifiers};
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
@@ -11,6 +19,208 @@ use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, Pt
 const QUEUE_SIZE: usize = 128;
 const MAX_INPUT_BYTES: usize = 1024 * 1024;
 const SCROLLBACK_LINES: usize = 10_000;
+
+/// Forward protocol replies to the PTY without borrowing the terminal from its
+/// own event listener. Clipboard and window-management events stay disabled.
+struct TerminalEvents(mpsc::Sender<Event>);
+
+impl EventListener for TerminalEvents {
+    fn send_event(&self, event: Event) {
+        if matches!(event, Event::PtyWrite(_) | Event::ColorRequest(..) | Event::TextAreaSizeRequest(_)) {
+            let _ = self.0.send(event);
+        }
+    }
+}
+
+struct Size {
+    rows: u16,
+    cols: u16,
+}
+
+impl Dimensions for Size {
+    fn total_lines(&self) -> usize {
+        self.screen_lines()
+    }
+
+    fn screen_lines(&self) -> usize {
+        self.rows as usize
+    }
+
+    fn columns(&self) -> usize {
+        self.cols as usize
+    }
+}
+
+/// Alacritty's parser, grid, modes, scrollback, and protocol responses.
+pub(crate) struct Screen {
+    term: Term<TerminalEvents>,
+    processor: Processor,
+    events: mpsc::Receiver<Event>,
+}
+
+impl Screen {
+    pub fn new(rows: u16, cols: u16) -> Self {
+        Self::with_history(rows, cols, SCROLLBACK_LINES)
+    }
+
+    fn with_history(rows: u16, cols: u16, history: usize) -> Self {
+        let (tx, events) = mpsc::channel();
+        let config = Config {
+            scrolling_history: history,
+            osc52: Osc52::Disabled,
+            // Input is encoded using the legacy xterm protocol below.
+            kitty_keyboard: false,
+            ..Config::default()
+        };
+        let size = Size { rows: rows.max(1), cols: cols.max(1) };
+        Self {
+            term: Term::new(config, &size, TerminalEvents(tx)),
+            processor: Processor::new(),
+            events,
+        }
+    }
+
+    pub fn process(&mut self, bytes: &[u8]) -> Vec<u8> {
+        let mut replies = self.flush_sync_timeout(Instant::now());
+        for byte in bytes {
+            self.processor.advance(&mut self.term, *byte);
+            // Handle requests in stream order, before a later sequence can
+            // change a requested color. This also bounds the event queue.
+            self.drain_events(&mut replies);
+        }
+        replies
+    }
+
+    fn drain_events(&mut self, replies: &mut Vec<u8>) {
+        while let Ok(event) = self.events.try_recv() {
+            let text = match event {
+                Event::PtyWrite(text) => text,
+                Event::ColorRequest(index, format) => format(self.color_rgb(index)),
+                Event::TextAreaSizeRequest(format) => {
+                    let (rows, cols) = self.size();
+                    format(WindowSize {
+                        num_lines: rows,
+                        num_cols: cols,
+                        // The outer terminal does not supply cell pixel sizes.
+                        cell_width: 0,
+                        cell_height: 0,
+                    })
+                }
+                _ => continue,
+            };
+            replies.extend_from_slice(text.as_bytes());
+        }
+    }
+
+    fn sync_deadline(&self) -> Option<Instant> {
+        self.processor.sync_timeout().sync_timeout()
+    }
+
+    fn flush_sync_timeout(&mut self, now: Instant) -> Vec<u8> {
+        if self.sync_deadline().is_some_and(|deadline| deadline <= now) {
+            self.processor.stop_sync(&mut self.term);
+        }
+        let mut replies = Vec::new();
+        self.drain_events(&mut replies);
+        replies
+    }
+
+    pub fn size(&self) -> (u16, u16) {
+        (self.term.screen_lines() as u16, self.term.columns() as u16)
+    }
+
+    fn resize(&mut self, rows: u16, cols: u16) {
+        self.term.resize(Size { rows: rows.max(1), cols: cols.max(1) });
+    }
+
+    pub fn mode(&self) -> TermMode {
+        *self.term.mode()
+    }
+
+    pub fn scroll_offset(&self) -> usize {
+        self.term.grid().display_offset()
+    }
+
+    pub fn scroll(&mut self, scroll: Scroll) {
+        if !self.mode().contains(TermMode::ALT_SCREEN) {
+            self.term.scroll_display(scroll);
+        }
+    }
+
+    pub fn cell(&self, row: u16, col: u16) -> Option<&Cell> {
+        let (rows, cols) = self.size();
+        if row >= rows || col >= cols {
+            return None;
+        }
+        let line = Line(row as i32 - self.scroll_offset() as i32);
+        Some(&self.term.grid()[Point::new(line, Column(col as usize))])
+    }
+
+    pub fn cursor(&self) -> RenderableCursor {
+        self.term.renderable_content().cursor
+    }
+
+    pub fn colors(&self) -> &color::Colors {
+        self.term.colors()
+    }
+
+    /// Resolve OSC palette overrides, with xterm defaults for color queries.
+    pub fn color_rgb(&self, index: usize) -> Rgb {
+        if index < color::COUNT {
+            if let Some(rgb) = self.colors()[index] {
+                return rgb;
+            }
+        }
+        const ANSI: [[u8; 3]; 16] = [
+            [0, 0, 0], [205, 0, 0], [0, 205, 0], [205, 205, 0],
+            [0, 0, 238], [205, 0, 205], [0, 205, 205], [229, 229, 229],
+            [127, 127, 127], [255, 0, 0], [0, 255, 0], [255, 255, 0],
+            [92, 92, 255], [255, 0, 255], [0, 255, 255], [255, 255, 255],
+        ];
+        let [r, g, b] = match index {
+            0..=15 => ANSI[index],
+            16..=231 => {
+                let value = index - 16;
+                let component = |n: usize| if n == 0 { 0 } else { (55 + n * 40) as u8 };
+                [component(value / 36), component(value / 6 % 6), component(value % 6)]
+            }
+            232..=255 => [8 + (index as u8 - 232) * 10; 3],
+            257 => [0, 0, 0],
+            259..=266 => ANSI[index - 259].map(|component| component / 2),
+            267 => [255, 255, 255],
+            268 => [128, 128, 128],
+            _ => [208, 208, 208],
+        };
+        Rgb { r, g, b }
+    }
+
+    #[cfg(test)]
+    fn contents(&self) -> String {
+        let (rows, cols) = self.size();
+        let mut text = String::new();
+        for row in 0..rows {
+            for col in 0..cols {
+                let cell = self.cell(row, col).unwrap();
+                if !cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+                    text.push_str(&cell_text(cell));
+                }
+            }
+            text.push('\n');
+        }
+        text
+    }
+}
+
+pub(crate) fn cell_text(cell: &Cell) -> String {
+    if cell.flags.contains(Flags::HIDDEN) || cell.c == '\t' {
+        return " ".to_owned();
+    }
+    let mut text = cell.c.to_string();
+    if let Some(zerowidth) = cell.zerowidth() {
+        text.extend(zerowidth.iter().copied());
+    }
+    text
+}
 
 enum Output {
     Data(Vec<u8>),
@@ -25,9 +235,11 @@ pub(crate) struct Session {
     killer: Box<dyn ChildKiller + Send + Sync>,
     input: mpsc::SyncSender<Vec<u8>>,
     output: mpsc::Receiver<Output>,
-    pub parser: vt100::Parser<Replies>,
+    pub screen: Screen,
     pub exit: Option<String>,
     pub error: Option<String>,
+    wake: Arc<dyn Fn() + Send + Sync>,
+    sync_timer: Option<(Instant, tokio::task::JoinHandle<()>)>,
 }
 
 impl Session {
@@ -88,13 +300,14 @@ impl Session {
             }
         });
 
+        let reaper_wake = wake.clone();
         thread::spawn(move || {
             let event = match child.wait() {
                 Ok(status) => Output::Exit(status.to_string()),
                 Err(err) => Output::Error(format!("Terminal wait: {err}")),
             };
             let _ = output_tx.send(event);
-            wake();
+            reaper_wake();
         });
 
         Ok(Self {
@@ -102,9 +315,11 @@ impl Session {
             killer,
             input: input_tx,
             output: output_rx,
-            parser: vt100::Parser::new_with_callbacks(rows, cols, SCROLLBACK_LINES, Replies::default()),
+            screen: Screen::new(rows, cols),
             exit: None,
             error: None,
+            wake,
+            sync_timer: None,
         })
     }
 
@@ -128,16 +343,35 @@ impl Session {
     pub fn poll(&mut self) {
         for _ in 0..QUEUE_SIZE {
             match self.output.try_recv() {
-                Ok(Output::Data(bytes)) => self.parser.process(&bytes),
+                Ok(Output::Data(bytes)) => {
+                    let replies = self.screen.process(&bytes);
+                    if let Err(err) = self.send(replies) {
+                        self.error = Some(err.to_string());
+                    }
+                }
                 Ok(Output::Exit(status)) => self.exit = Some(status),
                 Ok(Output::Error(err)) => self.error = Some(err),
                 Err(_) => break,
             }
         }
-        let replies = std::mem::take(&mut self.parser.callbacks_mut().bytes);
-        if !replies.is_empty() {
-            if let Err(err) = self.send(replies) {
-                self.error = Some(err.to_string());
+        let replies = self.screen.flush_sync_timeout(Instant::now());
+        if let Err(err) = self.send(replies) {
+            self.error = Some(err.to_string());
+        }
+        // A client may begin a synchronized update without ending it or sending
+        // more output. Wake the editor when Alacritty's timeout expires.
+        let deadline = self.screen.sync_deadline();
+        if self.sync_timer.as_ref().map(|timer| timer.0) != deadline {
+            if let Some((_, task)) = self.sync_timer.take() {
+                task.abort();
+            }
+            if let (Some(deadline), Ok(runtime)) = (deadline, tokio::runtime::Handle::try_current()) {
+                let wake = self.wake.clone();
+                let task = runtime.spawn(async move {
+                    tokio::time::sleep_until(deadline.into()).await;
+                    wake();
+                });
+                self.sync_timer = Some((deadline, task));
             }
         }
     }
@@ -157,9 +391,9 @@ impl Session {
 
     pub fn resize(&mut self, rows: u16, cols: u16) -> Result<()> {
         let (rows, cols) = (rows.max(1), cols.max(1));
-        if self.parser.screen().size() != (rows, cols) {
+        if self.screen.size() != (rows, cols) {
             self.master.resize(pty_size(rows, cols))?;
-            self.parser.screen_mut().set_size(rows, cols);
+            self.screen.resize(rows, cols);
         }
         Ok(())
     }
@@ -167,6 +401,9 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
+        if let Some((_, task)) = self.sync_timer.take() {
+            task.abort();
+        }
         if self.exit.is_none() {
             let _ = self.killer.kill();
         }
@@ -175,45 +412,6 @@ impl Drop for Session {
 
 fn pty_size(rows: u16, cols: u16) -> PtySize {
     PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }
-}
-
-/// Reply to queries used by shells and full-screen applications. OSC clipboard
-/// requests intentionally use the parser's default no-op implementation.
-#[derive(Default)]
-pub(crate) struct Replies {
-    bytes: Vec<u8>,
-}
-
-impl vt100::Callbacks for Replies {
-    fn unhandled_csi(
-        &mut self,
-        screen: &mut vt100::Screen,
-        i1: Option<u8>,
-        i2: Option<u8>,
-        params: &[&[u16]],
-        command: char,
-    ) {
-        if i2.is_some() || self.bytes.len() > 8192 {
-            return;
-        }
-        let param = params.first().and_then(|p| p.first()).copied().unwrap_or(0);
-        let response = match (i1, command, param) {
-            (None, 'n', 5) => "\x1b[0n".to_owned(),
-            (None | Some(b'?'), 'n', 6) => {
-                let (row, col) = screen.cursor_position();
-                let private = if i1.is_some() { "?" } else { "" };
-                format!("\x1b[{private}{};{}R", row + 1, col + 1)
-            }
-            (None, 'c', 0) => "\x1b[?1;2c".to_owned(),
-            (Some(b'>'), 'c', 0) => "\x1b[>0;0;0c".to_owned(),
-            (None, 't', 18) => {
-                let (rows, cols) = screen.size();
-                format!("\x1b[8;{rows};{cols}t")
-            }
-            _ => return,
-        };
-        self.bytes.extend_from_slice(response.as_bytes());
-    }
 }
 
 pub(crate) fn paste(text: &str, bracketed: bool) -> Vec<u8> {
@@ -326,32 +524,69 @@ mod tests {
 
     #[test]
     fn fragmented_unicode_colors_queries_and_alternate_screen() {
-        let mut parser = vt100::Parser::new_with_callbacks(3, 20, 100, Replies::default());
+        use alacritty_terminal::vte::ansi::{Color, NamedColor};
+        let mut screen = Screen::new(3, 20);
         for byte in "\x1b[31m界e\u{301}".as_bytes() {
-            parser.process(&[*byte]);
+            screen.process(&[*byte]);
         }
-        assert_eq!(parser.screen().cell(0, 0).unwrap().contents(), "界");
-        assert!(parser.screen().cell(0, 1).unwrap().is_wide_continuation());
-        assert_eq!(parser.screen().cell(0, 2).unwrap().contents(), "e\u{301}");
-        assert_eq!(parser.screen().cell(0, 0).unwrap().fgcolor(), vt100::Color::Idx(1));
-        parser.process(b"\x1b[6n\x1b[5n\x1b[c");
-        assert_eq!(parser.callbacks().bytes, b"\x1b[1;4R\x1b[0n\x1b[?1;2c");
-        parser.process(b"\x1b[?1049hOTHER\x1b[?1049l");
-        assert!(parser.screen().contents().contains("界e\u{301}"));
+        assert_eq!(screen.cell(0, 0).unwrap().c, '界');
+        assert!(screen.cell(0, 1).unwrap().flags.contains(Flags::WIDE_CHAR_SPACER));
+        assert_eq!(cell_text(screen.cell(0, 2).unwrap()), "e\u{301}");
+        assert_eq!(screen.cell(0, 0).unwrap().fg, Color::Named(NamedColor::Red));
+        assert_eq!(screen.process(b"\x1b[6n\x1b[5n\x1b[c"), b"\x1b[1;4R\x1b[0n\x1b[?6c");
+        screen.process(b"\x1b[?1049hOTHER\x1b[?1049l");
+        assert!(screen.contents().contains("界e\u{301}"));
     }
 
     #[test]
     fn scrollback_is_bounded_and_resize_preserves_state() {
-        let mut parser = vt100::Parser::new(2, 12, 3);
+        let mut screen = Screen::with_history(2, 12, 3);
         for line in 0..20 {
-            parser.process(format!("line{line}\r\n").as_bytes());
+            screen.process(format!("line{line}\r\n").as_bytes());
         }
-        parser.screen_mut().set_scrollback(usize::MAX);
-        assert_eq!(parser.screen().scrollback(), 3);
-        parser.screen_mut().set_scrollback(0);
-        parser.screen_mut().set_size(4, 20);
-        assert_eq!(parser.screen().size(), (4, 20));
-        assert!(parser.screen().contents().contains("line19"));
+        screen.scroll(Scroll::Top);
+        assert_eq!(screen.scroll_offset(), 3);
+        screen.scroll(Scroll::Bottom);
+        screen.resize(4, 20);
+        assert_eq!(screen.size(), (4, 20));
+        assert!(screen.contents().contains("line19"));
+    }
+
+    #[test]
+    fn palette_queries_modes_and_cursor_styles() {
+        use alacritty_terminal::vte::ansi::CursorShape;
+        let mut screen = Screen::new(3, 20);
+        assert_eq!(
+            screen.process(b"\x1b]4;1;rgb:12/34/56\x07\x1b]4;1;?\x07"),
+            b"\x1b]4;1;rgb:1212/3434/5656\x07"
+        );
+        screen.process(b"\x1b[?1h\x1b[?2004h\x1b[6 q");
+        assert!(screen.mode().contains(TermMode::APP_CURSOR | TermMode::BRACKETED_PASTE));
+        assert_eq!(screen.cursor().shape, CursorShape::Beam);
+        screen.process(b"\x1b[?25l");
+        assert_eq!(screen.cursor().shape, CursorShape::Hidden);
+        // Clipboard queries must not read or change the editor's clipboard.
+        assert!(screen.process(b"\x1b]52;c;?\x07").is_empty());
+        assert_eq!(screen.process(b"\x1b[18t"), b"\x1b[8;3;20t");
+    }
+
+    #[test]
+    fn synchronized_output_is_flushed_on_timeout() {
+        let mut screen = Screen::new(2, 20);
+        screen.process(b"\x1b[?2026hhello");
+        assert_eq!(screen.cell(0, 0).unwrap().c, ' ');
+        let deadline = screen.sync_deadline().expect("synchronized output timeout");
+        screen.flush_sync_timeout(deadline);
+        assert!(screen.contents().contains("hello"));
+        assert!(screen.sync_deadline().is_none());
+    }
+
+    #[test]
+    fn widening_reflows_wrapped_text() {
+        let mut screen = Screen::new(3, 6);
+        screen.process(b"abcdefghij");
+        screen.resize(3, 12);
+        assert!(screen.contents().contains("abcdefghij"));
     }
 
     #[cfg(unix)]
@@ -361,7 +596,7 @@ mod tests {
         cmd.args(["-c", "stty -echo; printf READY; read value; stty size; printf '<%s>' \"$value\""]);
         let mut session = Session::spawn(cmd, 4, 40, Arc::new(|| {})).unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while !session.parser.screen().contents().contains("READY") {
+        while !session.screen.contents().contains("READY") {
             session.poll();
             assert!(std::time::Instant::now() < deadline, "shell did not start");
             thread::sleep(std::time::Duration::from_millis(10));
@@ -370,7 +605,7 @@ mod tests {
         session.send(b"hello\n".to_vec()).unwrap();
         loop {
             session.poll();
-            let text = session.parser.screen().contents();
+            let text = session.screen.contents();
             if text.contains("<hello>") && session.exit.is_some() {
                 assert!(text.contains("6 50"));
                 break;

@@ -1,0 +1,50 @@
+name: Terminal
+
+on:
+  push:
+    branches: [terminal-emulator]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  HELIX_DISABLE_AUTO_GRAMMAR_BUILD: "1"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  terminal:
+    name: Rust 1.82 (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.82.0
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: terminal
+      - name: Format Rust sources
+        run: cargo fmt --all
+      - name: Check editor and test targets
+        run: cargo check -p helix-term --all-targets
+      - name: Test terminal protocol, rendering, and PTY integration
+        run: cargo test -p helix-term terminal::
+      - name: Check integration feature
+        run: cargo check -p helix-term --features integration
+      - name: Save formatting and dependency resolution
+        if: always()
+        shell: bash
+        run: git diff --binary > terminal-validation.patch
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: terminal-validation-${{ runner.os }}
+          path: terminal-validation.patch
+          retention-days: 7

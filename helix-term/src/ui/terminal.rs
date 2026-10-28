@@ -1,6 +1,10 @@
 //! A persistent terminal layer. Hiding it preserves the shell and scrollback.
 use std::sync::Arc;
 
+use alacritty_terminal::grid::Scroll;
+use alacritty_terminal::term::cell::{Cell, Flags};
+use alacritty_terminal::term::TermMode;
+use alacritty_terminal::vte::ansi::{Color as TerminalColor, CursorShape, NamedColor};
 use helix_core::Position;
 use helix_view::graphics::{Color, CursorKind, Modifier, Rect, Style, UnderlineStyle};
 use helix_view::input::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
@@ -8,7 +12,7 @@ use helix_view::Editor;
 use tui::buffer::Buffer;
 
 use crate::compositor::{Component, Context, Event, EventResult};
-use crate::terminal::{encode_key, paste, Session};
+use crate::terminal::{cell_text, encode_key, paste, Screen, Session};
 
 pub(crate) const ID: &str = "terminal";
 
@@ -38,23 +42,15 @@ impl Terminal {
     }
 
     fn send(&mut self, bytes: Vec<u8>, ctx: &mut Context) {
-        self.session.parser.screen_mut().set_scrollback(0);
+        self.session.screen.scroll(Scroll::Bottom);
         if let Err(err) = self.session.send(bytes) {
             ctx.editor.set_error(err.to_string());
         }
     }
 
     fn scroll(&mut self, up: bool, amount: usize) {
-        let screen = self.session.parser.screen_mut();
-        if screen.alternate_screen() {
-            return;
-        }
-        let offset = screen.scrollback();
-        screen.set_scrollback(if up {
-            offset.saturating_add(amount)
-        } else {
-            offset.saturating_sub(amount)
-        });
+        let amount = amount.min(i32::MAX as usize) as i32;
+        self.session.screen.scroll(Scroll::Delta(if up { amount } else { -amount }));
     }
 
     fn key(&mut self, key: KeyEvent, ctx: &mut Context) -> EventResult {
@@ -91,7 +87,13 @@ impl Terminal {
                 _ => {}
             }
         }
-        let bytes = encode_key(key, self.session.parser.screen().application_cursor());
+        let application_cursor = self.session.screen.mode().contains(TermMode::APP_CURSOR);
+        let mut bytes = encode_key(key, application_cursor);
+        if key.code == KeyCode::Enter
+            && self.session.screen.mode().contains(TermMode::LINE_FEED_NEW_LINE)
+        {
+            bytes.push(b'\n');
+        }
         self.send(bytes, ctx);
         EventResult::Consumed(None)
     }
@@ -114,7 +116,7 @@ impl Component for Terminal {
         match event {
             Event::Key(key) => return self.key(*key, ctx),
             Event::Paste(text) => {
-                let bracketed = self.session.parser.screen().bracketed_paste();
+                let bracketed = self.session.screen.mode().contains(TermMode::BRACKETED_PASTE);
                 self.send(paste(text, bracketed), ctx);
             }
             Event::Mouse(mouse) => match mouse.kind {
@@ -155,7 +157,7 @@ impl Component for Terminal {
         };
         frame.set_stringn(area.x, header_y, title, area.width as usize, header_style);
 
-        let screen = self.session.parser.screen();
+        let screen = &self.session.screen;
         for row in 0..body.height {
             for col in 0..body.width {
                 let target = frame.get_mut(body.x + col, body.y + row);
@@ -163,11 +165,10 @@ impl Component for Terminal {
                 if let Some(source) = screen.cell(row, col) {
                     // The renderer accounts for wide glyphs; do not draw their
                     // continuation cells as independent glyphs.
-                    if !source.is_wide_continuation() {
-                        let contents = source.contents();
-                        target.set_symbol(if contents.is_empty() { " " } else { contents });
+                    if !source.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+                        target.set_symbol(&cell_text(source));
                     }
-                    target.set_style(cell_style(source));
+                    target.set_style(cell_style(source, screen));
                 }
             }
         }
@@ -178,10 +179,11 @@ impl Component for Terminal {
             return (None, CursorKind::Hidden);
         }
         let body = body_area(area);
-        let screen = self.session.parser.screen();
-        let (row, col) = screen.cursor_position();
-        let hidden = screen.hide_cursor() || screen.scrollback() != 0 || body.height == 0
-            || self.session.exit.is_some();
+        let screen = &self.session.screen;
+        let cursor = screen.cursor();
+        let row = cursor.point.line.0.max(0) as u16;
+        let col = cursor.point.column.0 as u16;
+        let hidden = screen.scroll_offset() != 0 || body.height == 0 || self.session.exit.is_some();
         let position = Position::new(
             (body.y + row.min(body.height.saturating_sub(1)))
                 .min(area.bottom().saturating_sub(1)).max(area.y) as usize,
@@ -190,7 +192,17 @@ impl Component for Terminal {
         );
         // Some(position) also prevents the underlying editor cursor showing
         // through when an application hides its own cursor.
-        (Some(position), if hidden { CursorKind::Hidden } else { CursorKind::Block })
+        let kind = if hidden {
+            CursorKind::Hidden
+        } else {
+            match cursor.shape {
+                CursorShape::Block | CursorShape::HollowBlock => CursorKind::Block,
+                CursorShape::Beam => CursorKind::Bar,
+                CursorShape::Underline => CursorKind::Underline,
+                CursorShape::Hidden => CursorKind::Hidden,
+            }
+        };
+        (Some(position), kind)
     }
 }
 
@@ -199,29 +211,59 @@ fn body_area(area: Rect) -> Rect {
     Rect { x: area.x, y: area.bottom() - height, width: area.width, height }
 }
 
-fn color(color: vt100::Color) -> Color {
+fn color(color: TerminalColor, screen: &Screen) -> Color {
+    let index = match color {
+        TerminalColor::Spec(rgb) => return Color::Rgb(rgb.r, rgb.g, rgb.b),
+        TerminalColor::Indexed(index) => index as usize,
+        TerminalColor::Named(named) => named as usize,
+    };
+    if let Some(rgb) = screen.colors()[index] {
+        return Color::Rgb(rgb.r, rgb.g, rgb.b);
+    }
     match color {
-        vt100::Color::Default => Color::Reset,
-        vt100::Color::Idx(index) => Color::Indexed(index),
-        vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
+        TerminalColor::Named(NamedColor::Foreground | NamedColor::Background) => Color::Reset,
+        _ if index < 256 => Color::Indexed(index as u8),
+        _ => {
+            let rgb = screen.color_rgb(index);
+            Color::Rgb(rgb.r, rgb.g, rgb.b)
+        }
     }
 }
 
-fn cell_style(cell: &vt100::Cell) -> Style {
+fn cell_style(cell: &Cell, screen: &Screen) -> Style {
     let mut modifiers = Modifier::empty();
-    for (enabled, modifier) in [
-        (cell.bold(), Modifier::BOLD),
-        (cell.dim(), Modifier::DIM),
-        (cell.italic(), Modifier::ITALIC),
-        (cell.inverse(), Modifier::REVERSED),
+    for (flag, modifier) in [
+        (Flags::BOLD, Modifier::BOLD),
+        (Flags::DIM, Modifier::DIM),
+        (Flags::ITALIC, Modifier::ITALIC),
+        (Flags::INVERSE, Modifier::REVERSED),
+        (Flags::HIDDEN, Modifier::HIDDEN),
+        (Flags::STRIKEOUT, Modifier::CROSSED_OUT),
     ] {
-        if enabled { modifiers.insert(modifier); }
+        if cell.flags.contains(flag) { modifiers.insert(modifier); }
     }
-    Style::default()
-        .fg(color(cell.fgcolor()))
-        .bg(color(cell.bgcolor()))
+    let underline = if cell.flags.contains(Flags::DOUBLE_UNDERLINE) {
+        UnderlineStyle::DoubleLine
+    } else if cell.flags.contains(Flags::UNDERCURL) {
+        UnderlineStyle::Curl
+    } else if cell.flags.contains(Flags::DOTTED_UNDERLINE) {
+        UnderlineStyle::Dotted
+    } else if cell.flags.contains(Flags::DASHED_UNDERLINE) {
+        UnderlineStyle::Dashed
+    } else if cell.flags.contains(Flags::UNDERLINE) {
+        UnderlineStyle::Line
+    } else {
+        UnderlineStyle::Reset
+    };
+    let mut style = Style::default()
+        .fg(color(cell.fg, screen))
+        .bg(color(cell.bg, screen))
         .add_modifier(modifiers)
-        .underline_style(if cell.underline() { UnderlineStyle::Line } else { UnderlineStyle::Reset })
+        .underline_style(underline);
+    if let Some(underline_color) = cell.underline_color() {
+        style = style.underline_color(color(underline_color, screen));
+    }
+    style
 }
 
 #[cfg(test)]
@@ -238,5 +280,16 @@ mod tests {
             assert_eq!(body.width, area.width);
             assert!(body.height < height || height == 0);
         }
+    }
+
+    #[test]
+    fn renders_alacritty_attributes_and_palette_overrides() {
+        let mut screen = Screen::new(2, 20);
+        screen.process(b"\x1b]4;1;rgb:12/34/56\x07\x1b[31;1;9;4:3mX");
+        let cell = screen.cell(0, 0).unwrap();
+        let style = cell_style(cell, &screen);
+        assert_eq!(style.fg, Some(Color::Rgb(0x12, 0x34, 0x56)));
+        assert!(style.add_modifier.contains(Modifier::BOLD | Modifier::CROSSED_OUT));
+        assert_eq!(style.underline_style, Some(UnderlineStyle::Curl));
     }
 }
