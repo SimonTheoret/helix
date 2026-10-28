@@ -11,6 +11,7 @@ pub mod popup;
 pub mod prompt;
 mod spinner;
 mod statusline;
+pub(crate) mod terminal;
 mod text;
 mod text_decorations;
 
@@ -373,7 +374,7 @@ pub mod completers {
     use crate::ui::prompt::Completion;
     use helix_core::command_line::{self, Tokenizer};
     use helix_core::fuzzy::fuzzy_match;
-    use helix_core::syntax::LanguageServerFeature;
+    use helix_core::syntax::config::LanguageServerFeature;
     use helix_view::document::SCRATCH_BUFFER_NAME;
     use helix_view::theme;
     use helix_view::{editor::Config, Editor};
@@ -692,7 +693,8 @@ pub mod completers {
                 .flatten()
                 .filter_map(|res| {
                     let entry = res.ok()?;
-                    if entry.metadata().ok()?.is_file() {
+                    let metadata = entry.metadata().ok()?;
+                    if metadata.is_file() || metadata.is_symlink() {
                         entry.file_name().into_string().ok()
                     } else {
                         None

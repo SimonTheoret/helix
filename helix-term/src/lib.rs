@@ -10,6 +10,7 @@ pub mod events;
 pub mod health;
 pub mod job;
 pub mod keymap;
+mod terminal;
 pub mod ui;
 
 use std::path::Path;
@@ -76,8 +77,7 @@ fn open_external_url_callback(
     let commands = open::commands(url.as_str());
     async {
         for cmd in commands {
-            let mut command = tokio::process::Command::new(cmd.get_program());
-            command.args(cmd.get_args());
+            let mut command: tokio::process::Command = cmd.into();
             if command.output().await.is_ok() {
                 return Ok(job::Callback::Editor(Box::new(|_| {})));
             }
