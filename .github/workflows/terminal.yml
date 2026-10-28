@@ -35,7 +35,7 @@ jobs:
       - name: Check editor and test targets
         run: cargo check -p helix-term --all-targets
       - name: Test terminal protocol, rendering, and PTY integration
-        run: cargo test -p helix-term terminal::
+        run: "cargo test -p helix-term terminal::"
       - name: Check integration feature
         run: cargo check -p helix-term --features integration
       - name: Save formatting and dependency resolution
